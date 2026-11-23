@@ -1,0 +1,136 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+import type { ActorStoreList } from '../../src/types.js';
+import { searchActorsByKeywords, searchAgentSafeActors } from '../../src/utils/actor_search.js';
+import { mockApifyClient } from './helpers/tool_context.js';
+
+const listMock = vi.fn();
+const paramsHolder: { params: Record<string, unknown> } = { params: {} };
+
+const stubApifyClient = mockApifyClient({
+    store: () => ({
+        get params(): Record<string, unknown> {
+            return paramsHolder.params;
+        },
+        set params(value: Record<string, unknown>) {
+            paramsHolder.params = value;
+        },
+        list: listMock,
+    }),
+});
+
+const TRACKING = { traceId: 'thread-1', useCase: 'find a scraper' };
+
+const baseStoreActor: ActorStoreList = {
+    id: 'id-default',
+    name: 'actor-default',
+    username: 'user',
+    url: 'https://apify.com/user/actor-default',
+    currentPricingInfo: {
+        pricingModel: 'FREE',
+        apifyMarginPercentage: 0,
+        createdAt: new Date(0),
+        startedAt: new Date(0),
+    },
+    stats: {
+        totalBuilds: 0,
+        totalRuns: 0,
+        totalUsers: 0,
+        totalUsers7Days: 0,
+        totalUsers30Days: 0,
+        totalUsers90Days: 0,
+        totalMetamorphs: 0,
+        lastRunStartedAt: new Date(0),
+    },
+};
+
+function makeActor(overrides: Partial<ActorStoreList> = {}): ActorStoreList {
+    return { ...baseStoreActor, ...overrides };
+}
+
+describe('searchActorsByKeywords', () => {
+    beforeEach(() => {
+        listMock.mockReset();
+        paramsHolder.params = {};
+    });
+
+    it('forwards `includeInputSchema` as a store-client param', async () => {
+        listMock.mockResolvedValueOnce({ items: [] });
+        await searchActorsByKeywords({
+            search: 'foo',
+            apifyClient: stubApifyClient,
+            limit: 5,
+            offset: 0,
+            includeInputSchema: true,
+        });
+        expect(paramsHolder.params).toMatchObject({ includeInputSchema: true });
+        expect(listMock).toHaveBeenCalledWith({ search: 'foo', limit: 5, offset: 0 });
+    });
+
+    it('forwards the `tracking` option as `_traceId` and `_useCase`', async () => {
+        listMock.mockResolvedValueOnce({ items: [] });
+        await searchActorsByKeywords({ search: 'foo', apifyClient: stubApifyClient, limit: 5, tracking: TRACKING });
+        expect(paramsHolder.params).toMatchObject({ _traceId: 'thread-1', _useCase: 'find a scraper' });
+    });
+
+    it('always sets `_useNewStoreBackend`', async () => {
+        listMock.mockResolvedValueOnce({ items: [] });
+        await searchActorsByKeywords({ search: 'foo', apifyClient: stubApifyClient, limit: 5 });
+        expect(paramsHolder.params).toMatchObject({ _useNewStoreBackend: true });
+    });
+
+    it('omits `includeInputSchema` when not provided', async () => {
+        listMock.mockResolvedValueOnce({ items: [] });
+        await searchActorsByKeywords({ search: 'foo', apifyClient: stubApifyClient, limit: 5 });
+        expect(paramsHolder.params).not.toHaveProperty('includeInputSchema');
+    });
+});
+
+describe('searchAgentSafeActors', () => {
+    beforeEach(() => {
+        listMock.mockReset();
+        paramsHolder.params = {};
+    });
+
+    it('always sets includeInputSchema=true (public limit is capped at the API max)', async () => {
+        listMock.mockResolvedValueOnce({ items: [makeActor(), makeActor(), makeActor()] });
+        const result = await searchAgentSafeActors({
+            keywords: 'foo',
+            apifyClient: stubApifyClient,
+            limit: 3,
+            offset: 0,
+        });
+        expect(listMock).toHaveBeenCalledWith({ search: 'foo', limit: 3, offset: 0 });
+        expect(paramsHolder.params).toMatchObject({ includeInputSchema: true });
+        expect(result).toHaveLength(3);
+    });
+
+    it('sends keywords without letters or digits as empty keywords', async () => {
+        listMock.mockResolvedValueOnce({ items: [] });
+        await searchAgentSafeActors({ keywords: ' ... ', apifyClient: stubApifyClient, limit: 5, offset: 0 });
+        expect(listMock).toHaveBeenCalledWith({ search: '', limit: 5, offset: 0 });
+    });
+
+    it('forwards the trace id of the client and the use case of the call, sanitized', async () => {
+        listMock.mockResolvedValueOnce({ items: [] });
+        const apifyClient = mockApifyClient({ store: stubApifyClient.store, storeSearchTracking: TRACKING });
+        await searchAgentSafeActors({
+            keywords: 'foo',
+            apifyClient,
+            limit: 5,
+            offset: 0,
+            useCase: ` compare prices for apify_api_${'x'.repeat(36)} `,
+        });
+        expect(paramsHolder.params).toMatchObject({
+            _traceId: 'thread-1',
+            _useCase: 'compare prices for apify_api_***',
+        });
+    });
+
+    it('sends no use case when the call has none', async () => {
+        listMock.mockResolvedValueOnce({ items: [] });
+        const apifyClient = mockApifyClient({ store: stubApifyClient.store, storeSearchTracking: TRACKING });
+        await searchAgentSafeActors({ keywords: 'foo', apifyClient, limit: 5, offset: 0 });
+        expect(paramsHolder.params).not.toHaveProperty('_useCase');
+    });
+});
